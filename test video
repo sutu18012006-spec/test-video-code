@@ -1,117 +1,297 @@
-// the-editorial-engine.ts
-import {
-  layout,
-  prepareWithSegments,
-  layoutWithLines,
-  layoutNextLine,
-  walkLineRanges
-} from "./pretext.js";
-var BODY_FONT = '18px "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif';
-var BODY_LINE_HEIGHT = 30;
-var HEADLINE_FONT_FAMILY = '"Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif';
-var HEADLINE_TEXT = "NAVIGATING THE NEW ERA: HOW WEB3 PROJECTS CAN LEVERAGE KOLS";
-var GUTTER = 48;
-var COL_GAP = 40;
-var STATS_BAR_HEIGHT = 42;
-var DROP_CAP_LINES = 3;
-var MIN_SLOT_WIDTH = 50;
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Web3 KOL Marketing — The Editorial Engine: animated orbs with real-time text reflow at 60fps, zero DOM measurements.">
+  <title>Web3 KOL Marketing — The Editorial Engine</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; }
+    html, body {
+      background: radial-gradient(ellipse at 50% 40%, #0f0f14 0%, #0a0a0c 100%);
+      color: #e8e4dc;
+      height: 100vh;
+      overflow: hidden;
+    }
+    body {
+      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
+    }
+    #stage {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .line {
+      position: absolute;
+      white-space: pre;
+      pointer-events: none;
+      z-index: 1;
+      color: #e8e4dc;
+    }
+    .headline-line {
+      position: absolute;
+      white-space: pre;
+      pointer-events: none;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: -0.5px;
+      z-index: 2;
+    }
+    .drop-cap {
+      position: absolute;
+      pointer-events: none;
+      z-index: 2;
+      font-weight: 700;
+      color: #6490ff;
+    }
+    .orb {
+      position: absolute;
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 10;
+      will-change: transform;
+    }
+    .orb.paused { opacity: 0.45; }
+    .pullquote-box {
+      position: absolute;
+      pointer-events: none;
+      z-index: 3;
+      border-left: 3px solid #3a5a8a;
+      padding-left: 14px;
+    }
+    .pullquote-line {
+      position: absolute;
+      white-space: pre;
+      pointer-events: none;
+      font-style: italic;
+      color: #7099cc;
+    }
+    .stats-bar {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: rgba(6,6,10,0.88);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      padding: 10px 24px;
+      display: flex;
+      gap: 32px;
+      align-items: center;
+      font: 400 12px/1 "Helvetica Neue", Helvetica, Arial, sans-serif;
+      color: rgba(255,255,255,0.35);
+      z-index: 100;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+    .stat { display: flex; gap: 6px; align-items: center; }
+    .stat-value { color: rgba(255,255,255,0.7); font-weight: 600; }
+    .stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .hint {
+      position: fixed;
+      top: 16px; left: 50%;
+      transform: translateX(-50%);
+      font: 400 13px/1 "Helvetica Neue", Helvetica, Arial, sans-serif;
+      color: rgba(255,255,255,0.22);
+      z-index: 100;
+      background: rgba(0,0,0,0.45);
+      padding: 8px 18px;
+      border-radius: 999px;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+<div id="stage"></div>
+<div class="hint">Drag the orbs &middot; Click to pause &middot; Text reflows at 60fps &middot; Zero DOM reads</div>
+<div class="stats-bar">
+  <div class="stat"><span class="stat-label">Lines</span><span class="stat-value" id="sLines">0</span></div>
+  <div class="stat"><span class="stat-label">Reflow</span><span class="stat-value" id="sReflow">0ms</span></div>
+  <div class="stat"><span class="stat-label">DOM reads</span><span class="stat-value" id="sDom">0</span></div>
+  <div class="stat"><span class="stat-label">FPS</span><span class="stat-value" id="sFps">60</span></div>
+  <div class="stat"><span class="stat-label">Columns</span><span class="stat-value" id="sCols">0</span></div>
+</div>
+
+<script>
+// ─── PRETEXT ENGINE (self-contained, no external deps) ────────────────────────
+// Implements canvas-based text measurement and layout without DOM reflows.
+
+const _canvas = document.createElement('canvas');
+const _ctx = _canvas.getContext('2d');
+const _wordCache = new Map();
+
+function measureWord(word, font) {
+  const key = font + '|' + word;
+  if (_wordCache.has(key)) return _wordCache.get(key);
+  _ctx.font = font;
+  const w = _ctx.measureText(word).width;
+  _wordCache.set(key, w);
+  return w;
+}
+
+function measureSpaceWidth(font) {
+  return measureWord(' ', font);
+}
+
+// Segment: array of words with cached widths
+function prepareText(text, font) {
+  // Split into paragraphs, then words
+  const paragraphs = text.split(/\n+/).filter(p => p.trim().length > 0);
+  _ctx.font = font;
+  const spaceW = _ctx.measureText(' ').width;
+  const segments = [];
+  for (const para of paragraphs) {
+    const words = para.trim().split(/\s+/).filter(w => w.length > 0);
+    const wordData = words.map(w => ({ text: w, width: measureWord(w, font) }));
+    segments.push({ words: wordData, spaceW });
+  }
+  return { segments, font };
+}
+
+// cursor = { segIndex, wordIndex }
+function layoutNextLine(prepared, cursor, maxWidth) {
+  const { segments } = prepared;
+  let { segIndex, wordIndex } = cursor;
+
+  // Skip exhausted segments
+  while (segIndex < segments.length && wordIndex >= segments[segIndex].words.length) {
+    segIndex++;
+    wordIndex = 0;
+  }
+  if (segIndex >= segments.length) return null;
+
+  const seg = segments[segIndex];
+  const spaceW = seg.spaceW;
+  let lineText = '';
+  let lineWidth = 0;
+  let first = true;
+
+  while (wordIndex < seg.words.length) {
+    const word = seg.words[wordIndex];
+    const addW = first ? word.width : spaceW + word.width;
+    if (!first && lineWidth + addW > maxWidth + 0.5) break;
+    lineText += (first ? '' : ' ') + word.text;
+    lineWidth += addW;
+    wordIndex++;
+    first = false;
+  }
+
+  // If word is bigger than line, force it
+  if (lineText === '' && wordIndex < seg.words.length) {
+    lineText = seg.words[wordIndex].text;
+    lineWidth = seg.words[wordIndex].width;
+    wordIndex++;
+  }
+
+  // End of paragraph: advance to next segment
+  let nextSeg = segIndex;
+  let nextWord = wordIndex;
+  if (nextWord >= segments[segIndex].words.length) {
+    nextSeg = segIndex + 1;
+    nextWord = 0;
+  }
+
+  return {
+    text: lineText,
+    width: lineWidth,
+    cursor: { segIndex: nextSeg, wordIndex: nextWord }
+  };
+}
+
+function isExhausted(prepared, cursor) {
+  const { segments } = prepared;
+  let { segIndex, wordIndex } = cursor;
+  while (segIndex < segments.length && wordIndex >= segments[segIndex].words.length) {
+    segIndex++;
+    wordIndex = 0;
+  }
+  return segIndex >= segments.length;
+}
+
+// ─── LAYOUT HELPERS ───────────────────────────────────────────────────────────
+
+const MIN_SLOT_WIDTH = 50;
+
 function carveTextLineSlots(base, blocked) {
   let slots = [base];
-  for (let bi = 0;bi < blocked.length; bi++) {
-    const iv = blocked[bi];
+  for (const iv of blocked) {
     const next = [];
-    for (let si = 0;si < slots.length; si++) {
-      const s = slots[si];
-      if (iv.right <= s.left || iv.left >= s.right) {
-        next.push(s);
-        continue;
-      }
-      if (iv.left > s.left)
-        next.push({ left: s.left, right: iv.left });
-      if (iv.right < s.right)
-        next.push({ left: iv.right, right: s.right });
+    for (const s of slots) {
+      if (iv.right <= s.left || iv.left >= s.right) { next.push(s); continue; }
+      if (iv.left > s.left) next.push({ left: s.left, right: iv.left });
+      if (iv.right < s.right) next.push({ left: iv.right, right: s.right });
     }
     slots = next;
   }
-  return slots.filter((s) => s.right - s.left >= MIN_SLOT_WIDTH);
+  return slots.filter(s => s.right - s.left >= MIN_SLOT_WIDTH);
 }
+
 function circleIntervalForBand(cx, cy, r, bandTop, bandBottom, hPad, vPad) {
   const top = bandTop - vPad;
   const bottom = bandBottom + vPad;
-  if (top >= cy + r || bottom <= cy - r)
-    return null;
-  const minDy = cy >= top && cy <= bottom ? 0 : cy < top ? top - cy : cy - bottom;
-  if (minDy >= r)
-    return null;
+  if (top >= cy + r || bottom <= cy - r) return null;
+  const minDy = (cy >= top && cy <= bottom) ? 0 : (cy < top ? top - cy : cy - bottom);
+  if (minDy >= r) return null;
   const maxDx = Math.sqrt(r * r - minDy * minDy);
   return { left: cx - maxDx - hPad, right: cx + maxDx + hPad };
 }
-var BODY_TEXT = `Influencer marketing, or Key Opinion Leader (KOL) marketing, has been a cornerstone of Web2 brand strategies, but for Web3 projects, the rules of engagement have changed. As we venture into a decentralized digital future, the dynamics of influencer collaboration have evolved.
 
-So how do Web3 projects leverage KOLs effectively? And, more importantly, how do you choose the right platform to amplify your project's message?
+// ─── CONTENT ──────────────────────────────────────────────────────────────────
 
-Before diving into platform selection or identifying potential influencers, it's crucial to first establish your campaign's objectives. Are you aiming to build awareness for your decentralized app? Drive user acquisition for your token? Or perhaps onboard new members into your DAO?
+const HEADLINE_FONT_FAMILY = '"Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif';
+const BODY_FONT = '18px ' + HEADLINE_FONT_FAMILY;
+const BODY_LINE_HEIGHT = 30;
+const HEADLINE_TEXT = "NAVIGATING THE NEW ERA OF WEB3 KOL MARKETING";
+const GUTTER = 48;
+const COL_GAP = 40;
+const STATS_BAR_HEIGHT = 42;
+const DROP_CAP_LINES = 3;
 
-In Web3, these goals shape everything from platform choice to influencer style. Unlike Web2, where reach and engagement are often the primary KPIs, Web3 projects may prioritize community growth, long-term value creation, and even governance participation.
+const BODY_TEXT = `Influencer marketing, or Key Opinion Leader (KOL) marketing, has been a cornerstone of Web2 brand strategies, but for Web3 projects, the rules of engagement have changed. As we venture into a decentralized digital future, the dynamics of influencer collaboration have evolved in ways that demand a fundamentally different playbook.
 
-For example, when working with influencers, you may not just want a viral moment, but rather consistent community interaction over time — a much more critical factor in Web3, where building trust and participation is essential.
+Before diving into platform selection or identifying potential influencers, it is crucial to first establish your campaign's objectives. Are you aiming to build awareness for your decentralized app? Drive user acquisition for your token? Or perhaps onboard new members into your DAO? In Web3, these goals shape everything from platform choice to influencer style. Unlike Web2, where reach and engagement are often the primary KPIs, Web3 projects may prioritize community growth, long-term value creation, and even governance participation.
 
-In the Web3 space, your target audience isn't just your end-user; they can also be your contributors, liquidity providers, and governance participants. Thus, your KOL strategy should be deeply intertwined with the behaviors and interests of your audience.
-
-Web3 audiences are highly niche. A platform like X, which has become a go-to for the crypto and blockchain community, might be an excellent fit for projects looking to build credibility and educate users. On the other hand, platforms like Discord and Telegram serve as community hubs, ideal for deeper engagement and direct communication with users and influencers.
-
-For instance, KOLs who are active on platforms like YouTube might be perfect for complex educational content on DeFi, while TikTok influencers could be better for viral NFT campaigns targeting a younger, trend-driven audience.
+Web3 audiences are highly niche. A platform like X, which has become a go-to for the crypto and blockchain community, might be an excellent fit for projects looking to build credibility and educate users. On the other hand, platforms like Discord and Telegram serve as community hubs, ideal for deeper engagement and direct communication with users and influencers. KOLs who are active on YouTube might be perfect for complex educational content on DeFi, while TikTok influencers could be better for viral NFT campaigns targeting a younger, trend-driven audience.
 
 Not all influencers are created equal, especially in Web3. While Web2 influencers often prioritize brand partnerships and product placements, Web3 KOLs focus more on community-building, project advocacy, and even project governance. You want influencers who are genuinely aligned with your project's mission — those who see themselves as part of your decentralized future, not just marketers looking for a paycheck.
 
-An important metric to gauge here is authenticity. Does the influencer understand Web3 culture? Are they active participants in DAOs, trading NFTs, or contributing to open-source blockchain projects? These indicators often matter more than follower count or engagement numbers.
+An important metric to gauge here is authenticity. Does the influencer understand Web3 culture? Are they active participants in DAOs, trading NFTs, or contributing to open-source blockchain projects? These indicators often matter more than follower count or engagement numbers. Web3 KOLs also have a different kind of social capital — they are often early adopters and experts who have built strong reputations within niche communities.
 
-Web3 KOLs also have a different kind of social capital — they're often early adopters and experts who have built strong reputations within niche communities. These influencers can be found on platforms like X, Reddit and YouTube where they educate, debate, and advocate for their projects.
+Content in Web3 is not just about entertainment — it is about education, transparency, and participation. The community demands more: they want deep dives into project architecture, governance updates, and active discussion about tokenomics. KOLs in Web3 are not just entertainers — they are educators and advocates. Web3 marketing demands more than just reach — it requires fostering trust, transparency, and shared ownership within the community.
 
-When it comes to platform selection, there are key differences between Web2 and Web3. Traditional platforms like Instagram and Facebook might work for Web2 brands, but Web3 projects often thrive on platforms that support deeper, more technical content and community engagement.
+The projects that will thrive are those that leverage the right platforms, establish real connections with their communities, and partner with influencers who genuinely believe in what they are building. By moving away from the transactional dynamics of Web2 marketing and embracing a more transparent, value-driven approach, Web3 projects can unlock unparalleled levels of engagement, loyalty, and brand advocacy that far surpasses short-term hype.`;
 
-X is the home of crypto conversations, from token releases to governance votes. It's where your project's key discussions will take place. Projects like Ethereum and Polkadot have thrived here due to the platform's real-time interaction capabilities. Discord is the ultimate community-building platform for Web3. Whether it's hosting governance discussions, community AMAs or organizing events, Discord allows projects to build real-time, long-term relationships with their users.
-
-YouTube and Podcasts are the place for deep dives and educational content. Many Web3 influencers use these platforms to explain technical concepts like smart contracts, DeFi strategies or tokenomics to a broader audience. These platforms offer the right environments for more nuanced discussions and genuine community interaction, where engagement goes beyond likes and shares, focusing instead on active participation and feedback.
-
-While Web2 marketing often revolves around eye-catching content and viral trends, Web3 requires a shift in thinking. Content in Web3 isn't just about entertainment — it's about education, transparency, and participation.
-
-For Web3 projects, it's not enough to share flashy product announcements. The community demands more: they want deep dives into project architecture, governance updates, and active discussion about tokenomics. KOLs in Web3 aren't just entertainers — they're educators and advocates.
-
-Memes and humor are still important in both Web2 and Web3, but in Web3, these elements often serve to onboard and educate. For instance, a simple meme about DeFi might go viral because it's fun, but it also helps demystify complex financial concepts for new users.
-
-Web3 marketing demands more than just reach — it requires fostering trust, transparency, and shared ownership within the community. KOLs in Web3 must be more than mere promoters; they should embody the project's ethos and work collaboratively to shape its narrative. These influencers aren't just mouthpieces — they are builders, active participants in the ecosystem, and advocates for the project's long-term vision.
-
-The projects that will thrive are those that leverage the right platforms, establish real connections with their communities, and partner with influencers who genuinely believe in what they are building. By moving away from the transactional dynamics of Web2 marketing and embracing a more transparent, value-driven approach, Web3 projects can unlock unparalleled levels of engagement, loyalty, and brand advocacy that far surpasses short-term hype.
-
-At Souls Lab, we believe that Web3 is about more than just technology — it's about fostering community, transparency, and creating lasting value. With our deep experience in the Web3 space and a powerful network of over 200 SEA-based KOLs and crypto whales, we provide the connections and expertise to help projects successfully enter and thrive in the SEA market.
-
-Our mission is to partner with influencers who align with our vision of sustainable, future-ready projects. Together, we are shaping the next era of Web3 marketing, built on innovation, trust, and long-term growth. Let's elevate your project to the next level.
-
-Souls Lab is a SEA-based Web3 marketing consulting agency and product studio specializing in fundraising strategies, creative marketing, GTM approaches, and blockchain product development. We help early-stage protocols secure capital from tier-1 VCs and successfully launch tokens.`;
-var PULLQUOTE_TEXTS = [
-  ""Web3 KOLs must be more than mere promoters — they should embody the project's ethos and work collaboratively to shape its narrative."",
-  ""By moving away from transactional dynamics of Web2 and embracing a value-driven approach, Web3 projects can unlock unparalleled engagement and loyalty.""
+const PULLQUOTE_TEXTS = [
+  "Web3 KOLs are not just entertainers — they are educators, advocates, and builders shaping the next era of decentralized communities.",
+  "Authenticity matters more than follower count. The right influencer understands Web3 culture from the inside out."
 ];
-var stage = document.getElementById("stage");
-var orbDefs = [
-  { fx: 0.52, fy: 0.22, r: 110, vx: 24, vy: 16, color: [196, 163, 90] },
-  { fx: 0.18, fy: 0.48, r: 85, vx: -19, vy: 26, color: [100, 140, 255] },
-  { fx: 0.74, fy: 0.58, r: 95, vx: 16, vy: -21, color: [232, 100, 130] },
-  { fx: 0.38, fy: 0.72, r: 75, vx: -26, vy: -14, color: [80, 200, 140] },
-  { fx: 0.86, fy: 0.18, r: 65, vx: -13, vy: 19, color: [150, 100, 220] }
+
+// ─── ORB DEFINITIONS ─────────────────────────────────────────────────────────
+
+const orbDefs = [
+  { fx: 0.52, fy: 0.22, r: 110, vx: 24, vy: 16, color: [100, 140, 255] },
+  { fx: 0.18, fy: 0.48, r: 85,  vx: -19, vy: 26, color: [60, 180, 220] },
+  { fx: 0.74, fy: 0.58, r: 95,  vx: 16, vy: -21, color: [80, 100, 240] },
+  { fx: 0.38, fy: 0.72, r: 75,  vx: -26, vy: -14, color: [120, 200, 255] },
+  { fx: 0.86, fy: 0.18, r: 65,  vx: -13, vy: 19,  color: [40, 140, 200] }
 ];
+
+const stage = document.getElementById('stage');
+
 function createOrbEl(c) {
-  const el = document.createElement("div");
-  el.className = "orb";
+  const el = document.createElement('div');
+  el.className = 'orb';
   el.style.background = `radial-gradient(circle at 35% 35%, rgba(${c[0]},${c[1]},${c[2]},0.35), rgba(${c[0]},${c[1]},${c[2]},0.12) 55%, transparent 72%)`;
   el.style.boxShadow = `0 0 60px 15px rgba(${c[0]},${c[1]},${c[2]},0.18), 0 0 120px 40px rgba(${c[0]},${c[1]},${c[2]},0.07)`;
   stage.appendChild(el);
   return el;
 }
-var W0 = window.innerWidth;
-var H0 = window.innerHeight;
-var orbs = orbDefs.map((d) => ({
+
+const W0 = window.innerWidth;
+const H0 = window.innerHeight;
+const orbs = orbDefs.map(d => ({
   x: d.fx * W0,
   y: d.fy * H0,
   r: d.r,
@@ -126,131 +306,159 @@ var orbs = orbDefs.map((d) => ({
   dragStartOrbY: 0,
   el: createOrbEl(d.color)
 }));
-await document.fonts.ready;
-var preparedBody = prepareWithSegments(BODY_TEXT, BODY_FONT);
-var PQ_FONT = `italic 19px ${HEADLINE_FONT_FAMILY}`;
-var PQ_LINE_HEIGHT = 27;
-var preparedPQ = PULLQUOTE_TEXTS.map((t) => prepareWithSegments(t, PQ_FONT));
-var DROP_CAP_SIZE = BODY_LINE_HEIGHT * DROP_CAP_LINES - 4;
-var DROP_CAP_FONT = `700 ${DROP_CAP_SIZE}px ${HEADLINE_FONT_FAMILY}`;
-var preparedDropCap = prepareWithSegments(BODY_TEXT[0], DROP_CAP_FONT);
-var dropCapWidth = 0;
-walkLineRanges(preparedDropCap, 9999, (line) => {
-  dropCapWidth = line.width;
-});
-var DROP_CAP_TOTAL_W = Math.ceil(dropCapWidth) + 10;
-var dropCapEl = document.createElement("div");
-dropCapEl.className = "drop-cap";
-dropCapEl.textContent = BODY_TEXT[0];
+
+// ─── PREPARE TEXT ─────────────────────────────────────────────────────────────
+
+const preparedBody = prepareText(BODY_TEXT, BODY_FONT);
+const PQ_FONT = `italic 19px ${HEADLINE_FONT_FAMILY}`;
+const PQ_LINE_HEIGHT = 27;
+const preparedPQ = PULLQUOTE_TEXTS.map(t => prepareText(t, PQ_FONT));
+
+const DROP_CAP_SIZE = BODY_LINE_HEIGHT * DROP_CAP_LINES - 4;
+const DROP_CAP_FONT = `700 ${DROP_CAP_SIZE}px ${HEADLINE_FONT_FAMILY}`;
+const DROP_CAP_CHAR = BODY_TEXT[0];
+
+_ctx.font = DROP_CAP_FONT;
+const DROP_CAP_TOTAL_W = Math.ceil(_ctx.measureText(DROP_CAP_CHAR).width) + 10;
+
+const dropCapEl = document.createElement('div');
+dropCapEl.className = 'drop-cap';
+dropCapEl.textContent = DROP_CAP_CHAR;
 dropCapEl.style.font = DROP_CAP_FONT;
-dropCapEl.style.lineHeight = DROP_CAP_SIZE + "px";
+dropCapEl.style.lineHeight = DROP_CAP_SIZE + 'px';
 stage.appendChild(dropCapEl);
-var linePool = [];
-var headlinePool = [];
-var pqLinePool = [];
-var pqBoxPool = [];
+
+// ─── DOM POOLS ────────────────────────────────────────────────────────────────
+
+const linePool = [], headlinePool = [], pqLinePool = [], pqBoxPool = [];
+
 function syncPool(pool, count, className) {
   while (pool.length < count) {
-    const el = document.createElement("div");
+    const el = document.createElement('div');
     el.className = className;
     stage.appendChild(el);
     pool.push(el);
   }
-  for (let i = 0;i < pool.length; i++) {
-    pool[i].style.display = i < count ? "" : "none";
+  for (let i = 0; i < pool.length; i++) {
+    pool[i].style.display = i < count ? '' : 'none';
   }
 }
-var cachedHeadlineKey = "";
-var cachedHeadlineFontSize = 24;
-var cachedHeadlineLines = [];
+
+// ─── HEADLINE FIT ─────────────────────────────────────────────────────────────
+
+let cachedHeadlineKey = '';
+let cachedHeadlineFontSize = 24;
+let cachedHeadlineLines = [];
+
 function fitHeadline(maxWidth, maxHeight) {
   const key = `${maxWidth}:${maxHeight}`;
-  if (key === cachedHeadlineKey)
-    return { fontSize: cachedHeadlineFontSize, lines: cachedHeadlineLines };
+  if (key === cachedHeadlineKey) return { fontSize: cachedHeadlineFontSize, lines: cachedHeadlineLines };
   cachedHeadlineKey = key;
-  let lo = 24, hi = 120, best = lo;
+
+  let lo = 18, hi = 100, best = lo;
   let bestLines = [];
+
   while (lo <= hi) {
     const size = Math.floor((lo + hi) / 2);
     const font = `700 ${size}px ${HEADLINE_FONT_FAMILY}`;
     const lh = Math.round(size * 0.93);
-    const prepared = prepareWithSegments(HEADLINE_TEXT, font);
-    let breaksWord = false;
-    let lineCount = 0;
-    walkLineRanges(prepared, maxWidth, (line) => {
-      lineCount++;
-      if (line.end.graphemeIndex !== 0)
-        breaksWord = true;
-    });
-    const totalH = lineCount * lh;
-    if (!breaksWord && totalH <= maxHeight) {
+    const prepared = prepareText(HEADLINE_TEXT, font);
+    let cursor = { segIndex: 0, wordIndex: 0 };
+    const lines = [];
+    while (!isExhausted(prepared, cursor)) {
+      const result = layoutNextLine(prepared, cursor, maxWidth);
+      if (!result) break;
+      lines.push(result);
+      cursor = result.cursor;
+    }
+    const totalH = lines.length * lh;
+    if (totalH <= maxHeight) {
       best = size;
-      const result = layoutWithLines(prepared, maxWidth, lh);
-      bestLines = result.lines.map((l, i) => ({ x: 0, y: i * lh, text: l.text, width: l.width }));
+      bestLines = lines.map((l, i) => ({ x: 0, y: i * lh, text: l.text, width: l.width }));
       lo = size + 1;
     } else {
       hi = size - 1;
     }
   }
+
   cachedHeadlineFontSize = best;
   cachedHeadlineLines = bestLines;
   return { fontSize: best, lines: bestLines };
 }
+
+// ─── COLUMN LAYOUT ────────────────────────────────────────────────────────────
+
 function layoutColumn(prepared, startCursor, regionX, regionY, regionW, regionH, lineHeight, circleObs, rectObstacles) {
-  let cursor = startCursor;
+  let cursor = { ...startCursor };
   let lineTop = regionY;
   const lines = [];
   let textExhausted = false;
+
   while (lineTop + lineHeight <= regionY + regionH && !textExhausted) {
     const bandTop = lineTop;
     const bandBottom = lineTop + lineHeight;
     const blocked = [];
-    for (let oi = 0;oi < circleObs.length; oi++) {
-      const c = circleObs[oi];
+
+    for (const c of circleObs) {
       const iv = circleIntervalForBand(c.cx, c.cy, c.r, bandTop, bandBottom, c.hPad, c.vPad);
-      if (iv !== null)
-        blocked.push(iv);
+      if (iv !== null) blocked.push(iv);
     }
-    for (let ri = 0;ri < rectObstacles.length; ri++) {
-      const r = rectObstacles[ri];
-      if (bandBottom <= r.y || bandTop >= r.y + r.h)
-        continue;
+
+    for (const r of rectObstacles) {
+      if (bandBottom <= r.y || bandTop >= r.y + r.h) continue;
       blocked.push({ left: r.x, right: r.x + r.w });
     }
+
     const slots = carveTextLineSlots({ left: regionX, right: regionX + regionW }, blocked);
-    if (slots.length === 0) {
-      lineTop += lineHeight;
-      continue;
-    }
+
+    if (slots.length === 0) { lineTop += lineHeight; continue; }
+
     slots.sort((a, b) => a.left - b.left);
-    for (let si = 0;si < slots.length; si++) {
-      const slot = slots[si];
+
+    for (const slot of slots) {
       const slotWidth = slot.right - slot.left;
+      if (isExhausted(prepared, cursor)) { textExhausted = true; break; }
       const line = layoutNextLine(prepared, cursor, slotWidth);
-      if (line === null) {
-        textExhausted = true;
-        break;
-      }
+      if (!line) { textExhausted = true; break; }
       lines.push({ x: Math.round(slot.left), y: Math.round(lineTop), text: line.text, width: line.width });
-      cursor = line.end;
+      cursor = line.cursor;
     }
+
     lineTop += lineHeight;
   }
+
   return { lines, cursor };
 }
-var activeOrb = null;
-var pointerX = -9999;
-var pointerY = -9999;
+
+// ─── PULLQUOTE LAYOUT ─────────────────────────────────────────────────────────
+
+function layoutPQ(prepared, maxWidth, lineHeight) {
+  let cursor = { segIndex: 0, wordIndex: 0 };
+  const lines = [];
+  while (!isExhausted(prepared, cursor)) {
+    const result = layoutNextLine(prepared, cursor, maxWidth);
+    if (!result) break;
+    lines.push(result);
+    cursor = result.cursor;
+  }
+  return { lines, height: lines.length * lineHeight };
+}
+
+// ─── INTERACTION ──────────────────────────────────────────────────────────────
+
+let activeOrb = null;
+let pointerX = -9999, pointerY = -9999;
+
 function hitTestOrbs(px, py) {
-  for (let i = orbs.length - 1;i >= 0; i--) {
+  for (let i = orbs.length - 1; i >= 0; i--) {
     const o = orbs[i];
     const dx = px - o.x, dy = py - o.y;
-    if (dx * dx + dy * dy <= o.r * o.r)
-      return o;
+    if (dx * dx + dy * dy <= o.r * o.r) return o;
   }
   return null;
 }
-stage.addEventListener("pointerdown", (e) => {
+
+stage.addEventListener('pointerdown', e => {
   const orb = hitTestOrbs(e.clientX, e.clientY);
   if (orb) {
     activeOrb = orb;
@@ -262,7 +470,8 @@ stage.addEventListener("pointerdown", (e) => {
     e.preventDefault();
   }
 });
-window.addEventListener("pointermove", (e) => {
+
+window.addEventListener('pointermove', e => {
   pointerX = e.clientX;
   pointerY = e.clientY;
   if (activeOrb) {
@@ -270,135 +479,137 @@ window.addEventListener("pointermove", (e) => {
     activeOrb.y = activeOrb.dragStartOrbY + (e.clientY - activeOrb.dragStartY);
   }
 });
-window.addEventListener("pointerup", (e) => {
+
+window.addEventListener('pointerup', e => {
   if (activeOrb) {
     const dx = e.clientX - activeOrb.dragStartX;
     const dy = e.clientY - activeOrb.dragStartY;
     if (dx * dx + dy * dy < 16) {
       activeOrb.paused = !activeOrb.paused;
-      activeOrb.el.classList.toggle("paused", activeOrb.paused);
+      activeOrb.el.classList.toggle('paused', activeOrb.paused);
     }
     activeOrb.dragging = false;
     activeOrb = null;
   }
 });
-var fpsTimestamps = [];
-var fpsDisplay = 60;
+
+// ─── FPS COUNTER ─────────────────────────────────────────────────────────────
+
+const fpsTimestamps = [];
+let fpsDisplay = 60;
+
 function updateFPS(now) {
   fpsTimestamps.push(now);
   while (fpsTimestamps.length > 0 && fpsTimestamps[0] < now - 1000)
     fpsTimestamps.shift();
   fpsDisplay = fpsTimestamps.length;
 }
-var elSLines = document.getElementById("sLines");
-var elSReflow = document.getElementById("sReflow");
-var elSDom = document.getElementById("sDom");
-var elSFps = document.getElementById("sFps");
-var elSCols = document.getElementById("sCols");
-var lastTime = 0;
+
+// ─── STAT ELEMENTS ────────────────────────────────────────────────────────────
+
+const elSLines = document.getElementById('sLines');
+const elSReflow = document.getElementById('sReflow');
+const elSDom = document.getElementById('sDom');
+const elSFps = document.getElementById('sFps');
+const elSCols = document.getElementById('sCols');
+
+// ─── ANIMATION LOOP ───────────────────────────────────────────────────────────
+
+let lastTime = 0;
+
 function animate(now) {
   requestAnimationFrame(animate);
+
   const dt = Math.min((now - lastTime) / 1000, 0.05);
   lastTime = now;
+
   const pw = document.documentElement.clientWidth;
   const ph = document.documentElement.clientHeight;
-  for (let i = 0;i < orbs.length; i++) {
-    const o = orbs[i];
-    if (o.paused || o.dragging)
-      continue;
+
+  // Move orbs
+  for (const o of orbs) {
+    if (o.paused || o.dragging) continue;
     o.x += o.vx * dt;
     o.y += o.vy * dt;
-    if (o.x - o.r < 0) {
-      o.x = o.r;
-      o.vx = Math.abs(o.vx);
-    }
-    if (o.x + o.r > pw) {
-      o.x = pw - o.r;
-      o.vx = -Math.abs(o.vx);
-    }
-    if (o.y - o.r < GUTTER * 0.5) {
-      o.y = o.r + GUTTER * 0.5;
-      o.vy = Math.abs(o.vy);
-    }
-    if (o.y + o.r > ph - STATS_BAR_HEIGHT) {
-      o.y = ph - STATS_BAR_HEIGHT - o.r;
-      o.vy = -Math.abs(o.vy);
-    }
+    if (o.x - o.r < 0)              { o.x = o.r;                  o.vx = Math.abs(o.vx); }
+    if (o.x + o.r > pw)             { o.x = pw - o.r;             o.vx = -Math.abs(o.vx); }
+    if (o.y - o.r < GUTTER * 0.5)  { o.y = o.r + GUTTER * 0.5;  o.vy = Math.abs(o.vy); }
+    if (o.y + o.r > ph - STATS_BAR_HEIGHT) { o.y = ph - STATS_BAR_HEIGHT - o.r; o.vy = -Math.abs(o.vy); }
   }
-  for (let i = 0;i < orbs.length; i++) {
+
+  // Orb-orb collision
+  for (let i = 0; i < orbs.length; i++) {
     const a = orbs[i];
-    for (let j = i + 1;j < orbs.length; j++) {
+    for (let j = i + 1; j < orbs.length; j++) {
       const b = orbs[j];
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
+      const dx = b.x - a.x, dy = b.y - a.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       const minDist = a.r + b.r + 20;
       if (dist < minDist && dist > 0.1) {
         const force = (minDist - dist) * 0.8;
-        const nx = dx / dist;
-        const ny = dy / dist;
-        if (!a.paused && !a.dragging) {
-          a.vx -= nx * force * dt;
-          a.vy -= ny * force * dt;
-        }
-        if (!b.paused && !b.dragging) {
-          b.vx += nx * force * dt;
-          b.vy += ny * force * dt;
-        }
+        const nx = dx / dist, ny = dy / dist;
+        if (!a.paused && !a.dragging) { a.vx -= nx * force * dt; a.vy -= ny * force * dt; }
+        if (!b.paused && !b.dragging) { b.vx += nx * force * dt; b.vy += ny * force * dt; }
       }
     }
   }
-  const circleObs = [];
-  for (let i = 0;i < orbs.length; i++) {
-    const o = orbs[i];
-    circleObs.push({ cx: o.x, cy: o.y, r: o.r, hPad: 14, vPad: 4 });
-  }
+
+  const circleObs = orbs.map(o => ({ cx: o.x, cy: o.y, r: o.r, hPad: 14, vPad: 4 }));
+
   const t0 = performance.now();
+
+  // ─── HEADLINE ───────────────────────────────────────────────────────────────
   const headlineWidth = Math.min(pw - GUTTER * 2, 1000);
-  const maxHeadlineH = Math.floor(ph * 0.35);
+  const maxHeadlineH = Math.floor(ph * 0.28);
   const { fontSize: hlSize, lines: hlLines } = fitHeadline(headlineWidth, maxHeadlineH);
   const hlLineHeight = Math.round(hlSize * 0.93);
   const hlFont = `700 ${hlSize}px ${HEADLINE_FONT_FAMILY}`;
   const hlHeight = hlLines.length * hlLineHeight;
-  syncPool(headlinePool, hlLines.length, "headline-line");
-  for (let i = 0;i < hlLines.length; i++) {
+
+  syncPool(headlinePool, hlLines.length, 'headline-line');
+  for (let i = 0; i < hlLines.length; i++) {
     const el = headlinePool[i];
     const line = hlLines[i];
     el.textContent = line.text;
-    el.style.left = GUTTER + "px";
-    el.style.top = GUTTER + line.y + "px";
+    el.style.left = GUTTER + 'px';
+    el.style.top = (GUTTER + line.y) + 'px';
     el.style.font = hlFont;
-    el.style.lineHeight = hlLineHeight + "px";
+    el.style.lineHeight = hlLineHeight + 'px';
   }
+
   const bodyTop = GUTTER + hlHeight + 20;
   const bodyHeight = ph - bodyTop - STATS_BAR_HEIGHT - 8;
+
   const colCount = pw > 1000 ? 3 : pw > 640 ? 2 : 1;
   const totalGutter = GUTTER * 2 + COL_GAP * (colCount - 1);
   const maxContentW = Math.min(pw, 1500);
   const colWidth = Math.floor((maxContentW - totalGutter) / colCount);
   const contentLeft = Math.round((pw - (colCount * colWidth + (colCount - 1) * COL_GAP)) / 2);
+
+  // Drop cap
   const col0X = contentLeft;
   const dropCapRect = { x: col0X - 2, y: bodyTop - 2, w: DROP_CAP_TOTAL_W, h: DROP_CAP_LINES * BODY_LINE_HEIGHT + 2 };
-  dropCapEl.style.left = col0X + "px";
-  dropCapEl.style.top = bodyTop + "px";
+  dropCapEl.style.left = col0X + 'px';
+  dropCapEl.style.top = bodyTop + 'px';
+
+  // Pullquotes
   const pqPlacements = [
-    { colIdx: 0, yFrac: 0.48, wFrac: 0.52, side: "right" },
-    { colIdx: Math.min(1, colCount - 1), yFrac: 0.32, wFrac: 0.5, side: "left" }
+    { colIdx: 0, yFrac: 0.46, wFrac: 0.52, side: 'right' },
+    { colIdx: Math.min(1, colCount - 1), yFrac: 0.30, wFrac: 0.5, side: 'left' }
   ];
   const pqRects = [];
-  for (let pi = 0;pi < pqPlacements.length; pi++) {
+
+  for (let pi = 0; pi < pqPlacements.length; pi++) {
     const p = pqPlacements[pi];
-    if (p.colIdx >= colCount)
-      continue;
+    if (p.colIdx >= colCount) continue;
     const pqW = Math.round(colWidth * p.wFrac);
     const prepared = preparedPQ[pi];
-    const result = layout(prepared, pqW - 20, PQ_LINE_HEIGHT);
-    const pqH = result.height + 16;
+    const { lines: pqLines, height: pqContentH } = layoutPQ(prepared, pqW - 20, PQ_LINE_HEIGHT);
+    const pqH = pqContentH + 16;
     const colX = contentLeft + p.colIdx * (colWidth + COL_GAP);
-    const pqX = p.side === "right" ? colX + colWidth - pqW : colX;
+    const pqX = p.side === 'right' ? colX + colWidth - pqW : colX;
     const pqY = Math.round(bodyTop + bodyHeight * p.yFrac);
-    const pqLayoutLines = layoutWithLines(prepared, pqW - 20, PQ_LINE_HEIGHT);
-    const pqPosLines = pqLayoutLines.lines.map((l, i) => ({
+    const pqPosLines = pqLines.map((l, i) => ({
       x: pqX + 20,
       y: pqY + 8 + i * PQ_LINE_HEIGHT,
       text: l.text,
@@ -406,73 +617,83 @@ function animate(now) {
     }));
     pqRects.push({ x: pqX, y: pqY, w: pqW, h: pqH, lines: pqPosLines, colIdx: p.colIdx });
   }
+
+  // Body columns
   const allBodyLines = [];
-  let cursor = { segmentIndex: 0, graphemeIndex: 1 };
-  for (let col = 0;col < colCount; col++) {
+  // Start after drop-cap character (first char of body text)
+  let cursor = { segIndex: 0, wordIndex: 1 };
+
+  for (let col = 0; col < colCount; col++) {
     const colX = contentLeft + col * (colWidth + COL_GAP);
     const rects = [];
-    if (col === 0)
-      rects.push(dropCapRect);
-    for (let pi = 0;pi < pqRects.length; pi++) {
-      if (pqRects[pi].colIdx === col) {
-        const pq = pqRects[pi];
-        rects.push({ x: pq.x, y: pq.y, w: pq.w, h: pq.h });
-      }
+    if (col === 0) rects.push(dropCapRect);
+    for (const pq of pqRects) {
+      if (pq.colIdx === col) rects.push({ x: pq.x, y: pq.y, w: pq.w, h: pq.h });
     }
     const result = layoutColumn(preparedBody, cursor, colX, bodyTop, colWidth, bodyHeight, BODY_LINE_HEIGHT, circleObs, rects);
     allBodyLines.push(...result.lines);
     cursor = result.cursor;
   }
+
   const reflowTime = performance.now() - t0;
-  syncPool(linePool, allBodyLines.length, "line");
-  for (let i = 0;i < allBodyLines.length; i++) {
+
+  // ─── UPDATE DOM ─────────────────────────────────────────────────────────────
+
+  syncPool(linePool, allBodyLines.length, 'line');
+  for (let i = 0; i < allBodyLines.length; i++) {
     const el = linePool[i];
     const line = allBodyLines[i];
     el.textContent = line.text;
-    el.style.left = line.x + "px";
-    el.style.top = line.y + "px";
+    el.style.left = line.x + 'px';
+    el.style.top = line.y + 'px';
     el.style.font = BODY_FONT;
-    el.style.lineHeight = BODY_LINE_HEIGHT + "px";
+    el.style.lineHeight = BODY_LINE_HEIGHT + 'px';
   }
+
   let totalPQLines = 0;
-  for (let pi = 0;pi < pqRects.length; pi++)
-    totalPQLines += pqRects[pi].lines.length;
-  syncPool(pqBoxPool, pqRects.length, "pullquote-box");
-  syncPool(pqLinePool, totalPQLines, "pullquote-line");
+  for (const pq of pqRects) totalPQLines += pq.lines.length;
+
+  syncPool(pqBoxPool, pqRects.length, 'pullquote-box');
+  syncPool(pqLinePool, totalPQLines, 'pullquote-line');
+
   let pqLineIdx = 0;
-  for (let pi = 0;pi < pqRects.length; pi++) {
+  for (let pi = 0; pi < pqRects.length; pi++) {
     const pq = pqRects[pi];
     const boxEl = pqBoxPool[pi];
-    boxEl.style.left = pq.x + "px";
-    boxEl.style.top = pq.y + "px";
-    boxEl.style.width = pq.w + "px";
-    boxEl.style.height = pq.h + "px";
-    for (let li = 0;li < pq.lines.length; li++) {
-      const el = pqLinePool[pqLineIdx];
-      const line = pq.lines[li];
+    boxEl.style.left = pq.x + 'px';
+    boxEl.style.top = pq.y + 'px';
+    boxEl.style.width = pq.w + 'px';
+    boxEl.style.height = pq.h + 'px';
+    for (const line of pq.lines) {
+      const el = pqLinePool[pqLineIdx++];
       el.textContent = line.text;
-      el.style.left = line.x + "px";
-      el.style.top = line.y + "px";
+      el.style.left = line.x + 'px';
+      el.style.top = line.y + 'px';
       el.style.font = PQ_FONT;
-      el.style.lineHeight = PQ_LINE_HEIGHT + "px";
-      pqLineIdx++;
+      el.style.lineHeight = PQ_LINE_HEIGHT + 'px';
     }
   }
-  for (let i = 0;i < orbs.length; i++) {
-    const o = orbs[i];
-    o.el.style.left = o.x - o.r + "px";
-    o.el.style.top = o.y - o.r + "px";
-    o.el.style.width = o.r * 2 + "px";
-    o.el.style.height = o.r * 2 + "px";
+
+  for (const o of orbs) {
+    o.el.style.left = (o.x - o.r) + 'px';
+    o.el.style.top  = (o.y - o.r) + 'px';
+    o.el.style.width  = (o.r * 2) + 'px';
+    o.el.style.height = (o.r * 2) + 'px';
   }
+
   const hovered = hitTestOrbs(pointerX, pointerY);
-  document.body.style.cursor = activeOrb ? "grabbing" : hovered ? "grab" : "";
+  document.body.style.cursor = activeOrb ? 'grabbing' : hovered ? 'grab' : '';
+
   updateFPS(now);
-  elSLines.textContent = String(allBodyLines.length);
-  elSReflow.textContent = reflowTime.toFixed(1) + "ms";
-  elSDom.textContent = "0";
-  elSFps.textContent = String(fpsDisplay);
-  elSCols.textContent = String(colCount);
+  elSLines.textContent  = String(allBodyLines.length);
+  elSReflow.textContent = reflowTime.toFixed(1) + 'ms';
+  elSDom.textContent    = '0';
+  elSFps.textContent    = String(fpsDisplay);
+  elSCols.textContent   = String(colCount);
 }
+
 lastTime = performance.now();
 requestAnimationFrame(animate);
+</script>
+</body>
+</html>
